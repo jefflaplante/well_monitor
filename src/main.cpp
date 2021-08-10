@@ -4,80 +4,78 @@
 #include <ArduinoOTA.h>
 
 #include "pins.h"
+#include "state.h"
 #include "tasks.h"
 #include "sensor.h"
 #include "ctsensor.h"
 #include "ota.h"
+#include "mqtt.h"
+#include "homeassistant.hpp"
 
 #define true 1
 #define false 0
 
-// Timers and periods
-unsigned int blinkPeriod = 1000;
+/* struct to hold the state variables for the pump monitor */
+struct State state;
 
 // NTP Time
 const char *ntpServer         = "north-america.pool.ntp.org";
 const long gmtOffset_sec      = -28800; // GMT -8:00 (Pacific)
 const int  daylightOffset_sec = 3600;   // Yes to DST
 
-void setPins() {
-    pinMode(PIN_OUT_PUMP_RELAY, OUTPUT);    // Pump Relay 
-    pinMode(PIN_OUT_LED_BACKOFF, OUTPUT);   // LED Backoff Indicator
-
-    pinMode(PIN_ADC_CT_1, ANALOG);     // Mains L1 Current Sensor 0-1V
-    pinMode(PIN_ADC_CT_2, ANALOG);     // Mains L2 Current Sensor 0-1V
-
-    pinMode(PIN_IN_REQ_1, INPUT_PULLUP);    // Resident 1 Water Request (Low == water requested)
-    pinMode(PIN_IN_REQ_2, INPUT_PULLUP);    // Resident 2 Water Request (Low == water requested)
-
-    digitalWrite(PIN_OUT_PUMP_RELAY, LOW);  // Set outputs low by default
-    digitalWrite(PIN_OUT_LED_BACKOFF, LOW); // Set outputs low by default
-}
-
-void scanWifi() {
-    Serial.println("Scanning for Wifi networks");
-    WiFi.mode(WIFI_STA);
-    int n = WiFi.scanNetworks(); // returns the number of networks found
-    if (n == 0) {
-        Serial.println("no networks found");
-    } else {
-        Serial.println(String(n) + " networks found\n");
-        for (int i = 0; i < n; ++i) {
-            // Print SSID and RSSI for each network found
-            Serial.println(String(i + 1) + ": " + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm) " + String((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? " " : "*"));
-        }
-    }
-    Serial.println("");
-}
-
 void printLocalTime() {
-  struct tm timeinfo;
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time");
-    return;
-  }
-  Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo)){
+        Serial.println("Failed to obtain time");
+        mqttLog("Failed to obtain time from NTP server");
+        return;
+    }
+    Serial.println(&timeinfo, "%A, %B %d %Y %H:%M:%S");
 }
 
 void timeString(char* timeStr) {
     struct tm timeinfo;
     if(!getLocalTime(&timeinfo)){
         Serial.println("ERROR - Failed to obtain time");
+        mqttLog("ERROR: Failed to obtain time");
         return;
     }
     strftime(timeStr, sizeof(timeStr), "%H:%M:%S", &timeinfo);
+}
+
+/* Set default state */
+void setDefaultState() {
+    state.backoff = false;
+    state.pumpOn = false;
+    state.pumpOk = true;
+    state.pumpNotOkCount = 0;
+    state.backoffTimeoutSeconds = 0;
+    state.req1 = false;
+    state.req2 = false;
+    state.voltage = 0;
+    state.current = 0;
+    state.power = 0;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(10);
 
-    // Set default values and modes for GPIO pins
+    /* Set default values and modes for GPIO pins */
     setPins();
 
-    // scanWifi();
+    /* Set default state */
+    setDefaultState();
 
-    // Start blinking the built-in LED to denote we don't have wifi connected yet
+    /* Create semaphore to guard reads of ADC */
+    xSemaphoreADC = xSemaphoreCreateMutex();
+
+    if(xSemaphoreADC == NULL) {
+        mqttLog("ERROR creating xSemaphoreADC to guard ADC reads");
+    }
+
+    /* Task - blink onboard LED */
+    unsigned int blinkPeriod = 700;
     xTaskCreate(
         taskBlinkLED,
         "task Blink LED",
@@ -86,65 +84,52 @@ void setup() {
         1,
         &hBlinker
     );
-    vTaskSuspend(hBlinker); // Suspend and toggle from wifi task
+    vTaskSuspend(hBlinker);
 
-    // Task - WiFi connection
+    /* Task - Establish and maintain a WiFi connection */
     xTaskCreatePinnedToCore(
         taskWifi,    // Function for task
         "task Wifi", // Task name
         5000,        // Stack size (bytes)
-        hBlinker,    // Parameter
+        NULL,        // Parameter
         1,           // Task priority, larger number is higher priority
         NULL,        // Task handle
         0            // Core to pin to, 0 or 1
     );
 
-    //init and get the time
+    /* Check WiFi Connection */
+    Serial.println("Waiting for Wifi connection");
     while(WiFi.status() != WL_CONNECTED){
-        Serial.println("Wifi not connected, waiting 5 seconds...");
-        delay(5000);
+        Serial.print(".");
+        delay(500);
     }
+    Serial.println("");
 
+    /* Configure NTP and RTC */
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     printLocalTime();
-
-    // Task - Poll Sensors
-    xTaskCreate(
-        taskPollSensor,
-        "task PollSensor",
-        5000,
-        NULL,
-        3,
-        &hPollSensors
-    );
-    //  vTaskSuspend(hPollSensors);
 
     /* Setup OTA Updates */
     setupOTA();
 
+    /* Setup MQTT Client */
+    setupMQTT();
+
+    /* Task - Poll Sensors */
+    xTaskCreate(
+        taskPollSensors,
+        "task Poll Sensors",
+        5000,
+        &state,
+        3,
+        &hPollSensors
+    );
+
+    mqttLog("Well monitor setup complete");
 }
 
 void loop() {
     ArduinoOTA.handle();
-
-    int req_1_val = digitalRead(PIN_IN_REQ_1);
-    int req_2_val = digitalRead(PIN_IN_REQ_2);
-
-    double apparentPower = readCTApparentPower(PIN_ADC_CT_1);
-    Serial.println("Apparent Power: " + String(apparentPower));
-
-    Serial.println("Request 1: " + String(req_1_val));
-    Serial.println("Request 2: " + String(req_2_val));
-
-    // LOW is a request for water
-    // HIGH on both request pins should turn off pump
-    if(req_1_val && req_2_val) {
-        Serial.println("Switch pump off");
-        digitalWrite(PIN_OUT_PUMP_RELAY, LOW);
-    } else {
-        Serial.println("Switch pump on");
-        digitalWrite(PIN_OUT_PUMP_RELAY, HIGH);
-    }
-    
+    HASetupSensors();
     vTaskDelay(5000 / portTICK_PERIOD_MS);
 }

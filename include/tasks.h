@@ -20,6 +20,6 @@ void taskBlinkLED(void * parameter);
 
 void taskWifi(void * parameter);
 
-void taskPollSensor(void * vParameter);
+void taskPollSensors(void * vParameter);
 
 #endif /* !TASKS_H */

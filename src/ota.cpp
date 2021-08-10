@@ -6,10 +6,11 @@
 #include <ArduinoOTA.h>
 
 #include "ota.h"
+#include "config.h"
 
 void setupOTA() {
-    ArduinoOTA.setPort(3232);
-    ArduinoOTA.setHostname("well-control");
+    ArduinoOTA.setPort(OTA_PORT);
+    ArduinoOTA.setHostname(HOSTNAME);
     // ArduinoOTA.setPassword("admin"); // No authentication by default
 
     ArduinoOTA

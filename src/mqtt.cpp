@@ -1,27 +1,23 @@
+/* mqtt.cpp */
 
 #include <WiFi.h>
-extern "C" {
-	#include "freertos/FreeRTOS.h"
-	#include "freertos/timers.h"
-}
+
+#include <AsyncTCP.h>
 #include <AsyncMqttClient.h>
 
-
-#define MQTT_HOST IPAddress(192, 168, 1, 10)
-#define MQTT_PORT 1883
+#include "mqtt.h"
+#include "secrets.h"
+#include "config.h"
 
 AsyncMqttClient mqttClient;
-TimerHandle_t mqttReconnectTimer;
-TimerHandle_t wifiReconnectTimer;
 
-void connectToWifi() {
-  Serial.println("Connecting to Wi-Fi...");
-  // WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-}
+TimerHandle_t mqttReconnectTimer;
 
 void connectToMqtt() {
-  Serial.println("Connecting to MQTT...");
-  mqttClient.connect();
+    if(!mqttClient.connected()) {
+        Serial.println("Connecting to MQTT...");
+        mqttClient.connect();
+    }
 }
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -36,88 +32,112 @@ void WiFiEvent(WiFiEvent_t event) {
     case SYSTEM_EVENT_STA_DISCONNECTED:
         Serial.println("WiFi lost connection");
         xTimerStop(mqttReconnectTimer, 0); // ensure we don't reconnect to MQTT while reconnecting to Wi-Fi
-        xTimerStart(wifiReconnectTimer, 0);
         break;
+    default:
+        return;
     }
 }
 
 void onMqttConnect(bool sessionPresent) {
-  Serial.println("Connected to MQTT.");
-  Serial.print("Session present: ");
-  Serial.println(sessionPresent);
-  uint16_t packetIdSub = mqttClient.subscribe("test/lol", 2);
-  Serial.print("Subscribing at QoS 2, packetId: ");
-  Serial.println(packetIdSub);
-  mqttClient.publish("test/lol", 0, true, "test 1");
-  Serial.println("Publishing at QoS 0");
-  uint16_t packetIdPub1 = mqttClient.publish("test/lol", 1, true, "test 2");
-  Serial.print("Publishing at QoS 1, packetId: ");
-  Serial.println(packetIdPub1);
-  uint16_t packetIdPub2 = mqttClient.publish("test/lol", 2, true, "test 3");
-  Serial.print("Publishing at QoS 2, packetId: ");
-  Serial.println(packetIdPub2);
+    Serial.println("Connected to MQTT.");
+
+    Serial.print("Session present: ");
+    Serial.println(sessionPresent);
+
+    uint16_t packetIdSub = mqttClient.subscribe("test/lol", 2);
+    Serial.print("Subscribing at QoS 2, packetId: ");
+    Serial.println(packetIdSub);
+
+    mqttClient.publish("test/lol", 0, true, "test 1");
+    Serial.println("Publishing at QoS 0");
+
+    uint16_t packetIdPub1 = mqttClient.publish("test/lol", 1, true, "test 2");
+    Serial.print("Publishing at QoS 1, packetId: ");
+    Serial.println(packetIdPub1);
+
+    uint16_t packetIdPub2 = mqttClient.publish("test/lol", 2, true, "test 3");
+    Serial.print("Publishing at QoS 2, packetId: ");
+    Serial.println(packetIdPub2);
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  Serial.println("Disconnected from MQTT.");
+    Serial.println("[MQTT] Disconnected from MQTT.");
 
-  if (WiFi.isConnected()) {
-    xTimerStart(mqttReconnectTimer, 0);
-  }
+    if (WiFi.isConnected()) {
+        xTimerStart(mqttReconnectTimer, 0);
+    }
 }
 
 void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
-  Serial.println("Subscribe acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
-  Serial.print("  qos: ");
-  Serial.println(qos);
+    Serial.println("Subscribe acknowledged.");
+    Serial.print("packetId: ");
+    Serial.print(packetId);
+    Serial.print("  qos: ");
+    Serial.println(qos);
 }
 
 void onMqttUnsubscribe(uint16_t packetId) {
-  Serial.println("Unsubscribe acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
+    Serial.println("[MQTT] Unsubscribe acknowledged.");
+    Serial.print("packetId: ");
+    Serial.println(packetId);
 }
 
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
-  Serial.println("Publish received.");
-  Serial.print("  topic: ");
-  Serial.println(topic);
-  Serial.print("  qos: ");
-  Serial.println(properties.qos);
-  Serial.print("  dup: ");
-  Serial.println(properties.dup);
-  Serial.print("  retain: ");
-  Serial.println(properties.retain);
-  Serial.print("  len: ");
-  Serial.println(len);
-  Serial.print("  index: ");
-  Serial.println(index);
-  Serial.print("  total: ");
-  Serial.println(total);
+    Serial.println("[MQTT] Publish received.");
+    Serial.print("  topic: ");
+    Serial.print(topic);
+    Serial.print("  qos: ");
+    Serial.print(properties.qos);
+    Serial.print("  dup: ");
+    Serial.println(properties.dup);
+    Serial.print("  retain: ");
+    Serial.println(properties.retain);
+    Serial.print("len: ");
+    Serial.print(len);
+    Serial.print("  index: ");
+    Serial.print(index);
+    Serial.print("  total: ");
+    Serial.println(total);
 }
 
 void onMqttPublish(uint16_t packetId) {
-  Serial.println("Publish acknowledged.");
-  Serial.print("  packetId: ");
-  Serial.println(packetId);
+    Serial.print("[MQTT] Publish acknowledged.");
+    Serial.print(" packetId: ");
+    Serial.println(packetId);
 }
 
-void setup() {
+void setupMQTT() {
 
-  mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
-//   wifiReconnectTimer = xTimerCreate("wifiTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, reinterpret_cast<TimerCallbackFunction_t>(connectToWifi));
+    Serial.println("Setup MQTT");
 
-  WiFi.onEvent(WiFiEvent);
+    // Create a timer to connect to mqtt periodically
+    mqttReconnectTimer = xTimerCreate("mqttTimer", pdMS_TO_TICKS(2000), pdFALSE, (void*)0, 
+        reinterpret_cast<TimerCallbackFunction_t>(connectToMqtt));
 
-  mqttClient.onConnect(onMqttConnect);
-  mqttClient.onDisconnect(onMqttDisconnect);
-  mqttClient.onSubscribe(onMqttSubscribe);
-  mqttClient.onUnsubscribe(onMqttUnsubscribe);
-  mqttClient.onMessage(onMqttMessage);
-  mqttClient.onPublish(onMqttPublish);
-  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+    WiFi.onEvent(WiFiEvent);
 
-//   connectToWifi();
+    mqttClient.onConnect(onMqttConnect);
+    mqttClient.onDisconnect(onMqttDisconnect);
+    mqttClient.onSubscribe(onMqttSubscribe);
+    mqttClient.onUnsubscribe(onMqttUnsubscribe);
+    mqttClient.onMessage(onMqttMessage);
+    mqttClient.onPublish(onMqttPublish);
+
+    mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+    mqttClient.setCredentials(MQTT_USER, MQTT_PASSWORD);
+    mqttClient.setClientId(HOSTNAME);
+    
+    // TODO - add a last Will and Testament message
+    // mqttClient.setWill(const char* topic, uint8_t qos, bool retain, const char* payload, size_t length)
+
+    connectToMqtt();
+}
+
+uint16_t mqttPublish(const char* topic, uint8_t qos, bool retain, const char* payload) {
+    return mqttClient.publish(topic, qos, retain, payload);
+}
+
+uint16_t mqttLog(const char* msg) {
+    Serial.println("[Log]: " + String(msg));
+    return mqttClient.publish(MQTT_TOPIC_LOG, 0, false, msg);
 }
